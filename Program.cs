@@ -1,7 +1,7 @@
-﻿using Azure.Identity;
+using Azure.Identity;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Graph;
-using Microsoft.Graph.Models;
+using Microsoft.Graph.Auth;
 using MustMail;
 using Serilog;
 using Serilog.Events;
@@ -43,10 +43,9 @@ Log.Logger = new LoggerConfiguration()
         outputTemplate: "[{Timestamp:HH:mm:ss} {Level}] {Message:lj}{NewLine}{Exception}")
     .CreateLogger();
 
-// Prase config
+// Parse config
 Configuration? config  = configuration.Get<Configuration>();
 
-// If configuration can not be parsed to config - exit
 if (config == null || config.Graph == null || config.Smtp == null || config.SendFrom == null)
 {
     Log.Error("Could not load the configuration! Please see the README for how to set the configuration!");
@@ -62,29 +61,55 @@ ISmtpServerOptions? options = new SmtpServerOptionsBuilder()
     .Port(config.Smtp.Port, false)
     .Build();
 
-// Create client secrete credential 
+// --------------------------
+// Azure Government Fix Start
+// --------------------------
+
+// Determine cloud type via environment variable (optional)
+bool useGovCloud = configuration["AzureCloud"]?.Equals("Government", StringComparison.OrdinalIgnoreCase) ?? true;
+
+// Select AuthorityHost and Graph endpoints
+string authorityHost = useGovCloud
+    ? AzureAuthorityHosts.AzureGovernment
+    : AzureAuthorityHosts.AzurePublicCloud;
+
+string[] graphScopes = useGovCloud
+    ? new[] { "https://graph.microsoft.us/.default" }
+    : new[] { "https://graph.microsoft.com/.default" };
+
+string graphBaseUrl = useGovCloud
+    ? "https://graph.microsoft.us/v1.0"
+    : "https://graph.microsoft.com/v1.0";
+
+// Create client secret credential
 ClientSecretCredential clientSecretCredential = new(
-    config.Graph.TenantId, 
-    config.Graph.ClientId, 
+    config.Graph.TenantId,
+    config.Graph.ClientId,
     config.Graph.ClientSecret,
     new ClientSecretCredentialOptions
     {
-        AuthorityHost = AzureAuthorityHosts.AzureGovernment
+        AuthorityHost = authorityHost
     }
 );
 
-// Create graph client
-GraphServiceClient graphClient = new(clientSecretCredential, new[] { "https://graph.microsoft.us" });
+// Create Graph client
+GraphServiceClient graphClient = new GraphServiceClient(
+    graphBaseUrl,
+    new TokenCredentialAuthProvider(graphScopes, clientSecretCredential)
+);
+
+// ------------------------
+// Azure Government Fix End
+// ------------------------
 
 // SendFrom checks
 try
 {
-
     User? user = await graphClient.Users[config.SendFrom].GetAsync(rc => rc.QueryParameters.Select = new[] { "displayName", "mail", "mailboxSettings" });
 
     if (user == null)
     {
-        Log.Error("The specifed SendFrom address: '{From}' does not exist in the tenant!", config.SendFrom);
+        Log.Error("The specified SendFrom address: '{From}' does not exist in the tenant!", config.SendFrom);
         Environment.Exit(1);
     }
 
@@ -100,21 +125,18 @@ try
     }
 
     Log.Information("The user '{From}' has an email address configured and can send mail, the display name for the SendFrom address is: '{DisplayName}'", config.SendFrom, user.DisplayName);
-
 }
 catch (Microsoft.Graph.Models.ODataErrors.ODataError error)
 {
-    Log.Error("The specifed SendFrom address: '{From}' does not exist in the tenant! The Micrsoft Graph error message is: '{Error}'", config.SendFrom, error.Message);
+    Log.Error("The specified SendFrom address: '{From}' does not exist in the tenant! The Microsoft Graph error message is: '{Error}'", config.SendFrom, error.Message);
     Environment.Exit(1);
 }
 
 // Create email service provider
 ServiceProvider emailServiceProvider = new();
-
-// Add the message handler to the service provider
 emailServiceProvider.Add(new MessageHandler(graphClient, Log.Logger.ForContext<MessageHandler>(), config.SendFrom));
 
-// Create the server
+// Create the SMTP server
 SmtpServer.SmtpServer smtpServer = new(options, emailServiceProvider);
 
 // Log server start
@@ -122,5 +144,3 @@ Log.Information("Smtp server started on {SmtpHost}:{SmtpPort}", config.Smtp.Host
 
 // Start the server
 await smtpServer.StartAsync(CancellationToken.None);
-
-
