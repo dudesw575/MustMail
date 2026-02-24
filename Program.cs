@@ -1,6 +1,5 @@
 using Azure.Identity;
 using Microsoft.Graph;
-using Microsoft.Graph;
 using Microsoft.Extensions.Configuration;
 using MustMail;
 using Serilog;
@@ -13,7 +12,7 @@ using ServiceProvider = SmtpServer.ComponentModel.ServiceProvider;
 // Version banner
 Console.ForegroundColor = ConsoleColor.Cyan;
 Console.WriteLine("Must Mail");
-Console.WriteLine(Assembly.GetEntryAssembly()?.GetName().Version?.ToString(3));
+Console.WriteLine(Assembly.GetEntryAssembly()!.GetName().Version?.ToString(3));
 Console.ForegroundColor = ConsoleColor.White;
 
 // --------------------------
@@ -37,39 +36,19 @@ if (config == null || config.Graph == null || config.Smtp == null || config.Send
 // --------------------------
 // Logger
 // --------------------------
-Configuration? config = configuration.Get<Configuration>();
-
-if (config == null || config.Graph == null || config.Smtp == null || config.SendFrom == null)
-{
-    Console.ForegroundColor = ConsoleColor.Red;
-    Console.WriteLine("Could not load configuration! Check your .env or appsettings.json.");
-    Environment.Exit(1);
-}
-
-// --------------------------
-// Logger
-// --------------------------
 string logLevelString = configuration["LogLevel"] ?? "Information";
 bool parsed = Enum.TryParse<LogEventLevel>(logLevelString, ignoreCase: true, out var logLevel);
 if (!parsed) logLevel = LogEventLevel.Information;
 
-if (!parsed) logLevel = LogEventLevel.Information;
-
 Log.Logger = new LoggerConfiguration()
     .MinimumLevel.Is(logLevel)
-    .WriteTo.Console(
     .WriteTo.Console(
         theme: Serilog.Sinks.SystemConsole.Themes.AnsiConsoleTheme.Literate,
         outputTemplate: "[{Timestamp:HH:mm:ss} {Level}] {Message:lj}{NewLine}{Exception}")
     .CreateLogger();
 
 Log.Information("Configuration: \n {Serialize}", JsonSerializer.Serialize(config, new JsonSerializerOptions { WriteIndented = true }));
-Log.Information("Configuration: \n {Serialize}", JsonSerializer.Serialize(config, new JsonSerializerOptions { WriteIndented = true }));
 
-// --------------------------
-// SMTP Server Options
-// --------------------------
-ISmtpServerOptions options = new SmtpServerOptionsBuilder()
 // --------------------------
 // SMTP Server Options
 // --------------------------
@@ -80,11 +59,9 @@ ISmtpServerOptions options = new SmtpServerOptionsBuilder()
 
 // --------------------------
 // Azure Cloud Setup
-// Azure Graph Setup
 // --------------------------
 // Use Azure Government only if explicitly configured as "Government"
 bool useGovCloud = configuration["AzureCloud"]?.Equals("Government", StringComparison.OrdinalIgnoreCase) ?? false;
-bool useGovCloud = configuration["AzureCloud"]?.Equals("Government", StringComparison.OrdinalIgnoreCase) ?? true;
 
 string authorityHost = useGovCloud
     ? AzureAuthorityHosts.AzureGovernment
@@ -100,7 +77,6 @@ string[] graphScopes = useGovCloud
 
 // Credential
 var clientSecretCredential = new ClientSecretCredential(
-var clientSecretCredential = new ClientSecretCredential(
     config.Graph.TenantId,
     config.Graph.ClientId,
     config.Graph.ClientSecret,
@@ -112,20 +88,7 @@ var graphHttpClient = new HttpClient();
 graphHttpClient.BaseAddress = new Uri(graphBaseUrl);
 var authProvider = new Azure.Identity.TokenCredentialAuthProvider(clientSecretCredential, graphScopes);
 var graphClient = new GraphServiceClient(authProvider, graphHttpClient);
-// Graph client options
-var graphClientOptions = new GraphServiceClientOptions
-{
-    BaseUrl = useGovCloud
-        ? "https://graph.microsoft.us/v1.0"
-        : "https://graph.microsoft.com/v1.0"
-};
 
-// Graph client (modern SDK)
-var graphClient = new GraphServiceClient(clientSecretCredential, graphScopes, graphClientOptions);
-
-// --------------------------
-// Validate SendFrom User
-// --------------------------
 // --------------------------
 // Validate SendFrom User
 // --------------------------
@@ -133,27 +96,20 @@ try
 {
     var user = await graphClient.Users[config.SendFrom].GetAsync(req =>
         req.QueryParameters.Select = new[] { "displayName", "mail", "mailboxSettings" });
-    var user = await graphClient.Users[config.SendFrom].GetAsync(req =>
-        req.QueryParameters.Select = new[] { "displayName", "mail", "mailboxSettings" });
 
-    if (user == null || (user.Mail == null && user.UserPrincipalName == null))
     if (user == null || (user.Mail == null && user.UserPrincipalName == null))
     {
         Log.Error("The SendFrom address '{From}' does not exist or has no email.", config.SendFrom);
-        Log.Error("SendFrom '{From}' does not exist or has no email.", config.SendFrom);
         Environment.Exit(1);
     }
 
     if (user.MailboxSettings == null)
         Log.Warning("Mailbox settings for '{From}' not found. Sending may fail.", config.SendFrom);
-        Log.Warning("Mailbox settings for '{From}' not found. Sending may fail.", config.SendFrom);
 
-    Log.Information("SendFrom '{From}' is valid. DisplayName: '{DisplayName}'", config.SendFrom, user.DisplayName);
     Log.Information("SendFrom '{From}' is valid. DisplayName: '{DisplayName}'", config.SendFrom, user.DisplayName);
 }
 catch (Microsoft.Graph.Models.ODataErrors.ODataError error)
 {
-    Log.Error("SendFrom '{From}' not found. Graph error: {Error}", config.SendFrom, error.Message);
     Log.Error("SendFrom '{From}' not found. Graph error: {Error}", config.SendFrom, error.Message);
     Environment.Exit(1);
 }
@@ -161,17 +117,12 @@ catch (Microsoft.Graph.Models.ODataErrors.ODataError error)
 // --------------------------
 // SMTP Email Service
 // --------------------------
-// --------------------------
-// SMTP Email Service
-// --------------------------
 ServiceProvider emailServiceProvider = new();
 emailServiceProvider.Add(new MessageHandler(graphClient, Log.Logger.ForContext<MessageHandler>(), config.SendFrom));
 
 // Create and start SMTP server
-// Create and start SMTP server
 SmtpServer.SmtpServer smtpServer = new(options, emailServiceProvider);
 
-Log.Information("SMTP server started on {Host}:{Port}", config.Smtp.Host, config.Smtp.Port);
 Log.Information("SMTP server started on {Host}:{Port}", config.Smtp.Host, config.Smtp.Port);
 
 await smtpServer.StartAsync(CancellationToken.None);
