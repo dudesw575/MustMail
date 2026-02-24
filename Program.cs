@@ -9,14 +9,16 @@ using System.Reflection;
 using System.Text.Json;
 using ServiceProvider = SmtpServer.ComponentModel.ServiceProvider;
 
-// Version banner
+// --------------------------
+// Banner
+// --------------------------
 Console.ForegroundColor = ConsoleColor.Cyan;
 Console.WriteLine("Must Mail");
-Console.WriteLine(Assembly.GetEntryAssembly()!.GetName().Version?.ToString(3));
+Console.WriteLine(Assembly.GetEntryAssembly()?.GetName().Version?.ToString(3));
 Console.ForegroundColor = ConsoleColor.White;
 
 // --------------------------
-// Configuration
+// Load configuration
 // --------------------------
 IConfigurationBuilder builder = new ConfigurationBuilder()
     .SetBasePath(Directory.GetCurrentDirectory())
@@ -58,7 +60,7 @@ ISmtpServerOptions options = new SmtpServerOptionsBuilder()
     .Build();
 
 // --------------------------
-// Azure Cloud Setup
+// Azure Graph Setup
 // --------------------------
 bool useGovCloud = configuration["AzureCloud"]?.Equals("Government", StringComparison.OrdinalIgnoreCase) ?? true;
 
@@ -66,24 +68,30 @@ string authorityHost = useGovCloud
     ? AzureAuthorityHosts.AzureGovernment
     : AzureAuthorityHosts.AzurePublicCloud;
 
-string graphBaseUrl = useGovCloud
-    ? "https://graph.microsoft.us/v1.0"
-    : "https://graph.microsoft.com/v1.0";
-
 string[] graphScopes = useGovCloud
     ? new[] { "https://graph.microsoft.us/.default" }
     : new[] { "https://graph.microsoft.com/.default" };
 
-// Credential
 var clientSecretCredential = new ClientSecretCredential(
     config.Graph.TenantId,
     config.Graph.ClientId,
     config.Graph.ClientSecret,
-    new ClientSecretCredentialOptions { AuthorityHost = authorityHost }
+    new ClientSecretCredentialOptions
+    {
+        AuthorityHost = authorityHost
+    }
 );
 
+// Graph client options
+var graphClientOptions = new GraphServiceClientOptions
+{
+    BaseUrl = useGovCloud
+        ? "https://graph.microsoft.us/v1.0"
+        : "https://graph.microsoft.com/v1.0"
+};
+
 // Graph client (modern SDK)
-var graphClient = new GraphServiceClient(graphBaseUrl, new Azure.Identity.TokenCredentialAuthProvider(clientSecretCredential, graphScopes));
+var graphClient = new GraphServiceClient(clientSecretCredential, graphScopes, graphClientOptions);
 
 // --------------------------
 // Validate SendFrom User
@@ -95,7 +103,7 @@ try
 
     if (user == null || (user.Mail == null && user.UserPrincipalName == null))
     {
-        Log.Error("The SendFrom address '{From}' does not exist or has no email.", config.SendFrom);
+        Log.Error("SendFrom '{From}' does not exist or has no email.", config.SendFrom);
         Environment.Exit(1);
     }
 
