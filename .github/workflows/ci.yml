@@ -1,4 +1,4 @@
-name: Publish
+name: Publish Linux + Docker
 
 permissions:
   contents: write
@@ -21,7 +21,8 @@ env:
 jobs:
   version:
     runs-on: ubuntu-latest
-    name: Bump version
+    outputs:
+      TAG: ${{ steps.set_tag.outputs.TAG }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -29,55 +30,27 @@ jobs:
           ref: main
 
       - name: Determine tag
-        shell: bash
+        id: set_tag
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             if [ -z "${{ github.event.inputs.tag }}" ]; then
-              # auto-generate tag: vYYYYMMDD-HHMM
               TAG="v$(date +%Y%m%d-%H%M)"
-              echo "No tag provided. Using auto-generated tag: $TAG"
+              echo "No tag provided. Auto-generated TAG=$TAG"
             else
               TAG="${{ github.event.inputs.tag }}"
             fi
           else
             TAG="${{ github.event.release.tag_name }}"
           fi
-          VERSION="${TAG#v}"
+
           echo "TAG=$TAG" >> $GITHUB_ENV
-          echo "VERSION=$VERSION" >> $GITHUB_ENV
+          echo "VERSION=${TAG#v}" >> $GITHUB_ENV
+          echo "TAG=$TAG" >> $GITHUB_OUTPUT
 
-      - name: Bump project version
-        id: bump
-        uses: vers-one/dotnet-project-version-updater@v1.3
-        with:
-          file: "MustMail.csproj"
-          version: ${{ env.VERSION }}
-
-      - name: Commit version bump
-        run: |
-          git config user.name "${GITHUB_ACTOR}"
-          git config user.email "${GITHUB_ACTOR_ID}+${GITHUB_ACTOR}@users.noreply.github.com"
-          git add .
-          git commit -m "Bump project version to ${{ steps.bump.outputs.newVersion }}" || echo "No changes to commit"
-          git push
-
-  release:
+  build-and-push:
     needs: version
-    name: Binary Release
-    strategy:
-      matrix:
-        kind: ['linux', 'windows', 'macOS']
-        include:
-          - kind: linux
-            os: ubuntu-latest
-            target: linux-x64
-          - kind: windows
-            os: windows-latest
-            target: win-x64
-          - kind: macOS
-            os: macos-latest
-            target: osx-x64
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
+    name: Build Linux + Docker
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -89,69 +62,28 @@ jobs:
         with:
           dotnet-version: 8.0.103
 
-      - name: Build
+      - name: Build Linux binary
         shell: bash
         run: |
-          release_name="MustMail-${TAG}-${{ matrix.target }}"
+          echo "Building Linux binary for tag ${{ needs.version.outputs.TAG }}"
+          dotnet publish MustMail.csproj \
+            --framework net8.0 \
+            --runtime linux-x64 \
+            -c Release \
+            -o "MustMail-${{ needs.version.outputs.TAG }}" \
+            -p:PublishSingleFile=true \
+            --self-contained false
 
-          # Build everything
-          dotnet publish MustMail.csproj --framework net8.0 --runtime "${{ matrix.target }}" -c Release -o "$release_name" -p:PublishSingleFile=true --self-contained false 
-
-          # Pack files
-          if [ "${{ matrix.target }}" == "win-x64" ]; then
-            7z a -tzip "${release_name}.zip" "./${release_name}/*" "MustMail.xml"
-          else
-            tar czvf "${release_name}.tar.gz" "$release_name"
-          fi
-
-          # Delete output directory
-          rm -r "$release_name"
-
-      - name: Create tag if missing
-        shell: bash
-        run: |
-          if ! git rev-parse "$TAG" >/dev/null 2>&1; then
-            echo "Creating tag $TAG..."
-            git tag "$TAG"
-            git push origin "$TAG"
-          else
-            echo "Tag $TAG already exists. Skipping creation."
-          fi
-
-      - name: Publish
-        uses: softprops/action-gh-release@v1
-        with:
-          files: "MustMail-*"
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  build-and-push-image:
-    needs: version
-    name: Docker Release
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          ref: main
-
-      - name: Log in to the Container registry
+      - name: Log in to Docker registry
         uses: docker/login-action@v2
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract metadata (tags, labels) for Docker
-        id: meta
-        uses: docker/metadata-action@v4
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-
       - name: Build and push Docker image
         uses: docker/build-push-action@v3
         with:
           context: .
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.version.outputs.TAG }}
