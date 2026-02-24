@@ -69,12 +69,12 @@ ClientSecretCredential clientSecretCredential = new(
     config.Graph.ClientSecret,
     new ClientSecretCredentialOptions
     {
-        AuthorityHost =  AzureAuthorityHosts.AzurePublicCloud
+        AuthorityHost = AzureAuthorityHosts.AzureGovernment
     }
 );
 
 // Create graph client
-GraphServiceClient graphClient = new(clientSecretCredential, new[] { "https://graph.microsoft.com/.default" });
+GraphServiceClient graphClient = new(clientSecretCredential, new[] { "https://graph.microsoft.us/.default" });
 
 // SendFrom checks
 try
