@@ -74,7 +74,7 @@ ClientSecretCredential clientSecretCredential = new(
 );
 
 // Create graph client
-GraphServiceClient graphClient = new(clientSecretCredential, new[] { "https://graph.microsoft.us/.default" });
+GraphServiceClient graphClient = new(clientSecretCredential, new[] { "https://graph.microsoft.us" });
 
 // SendFrom checks
 try
