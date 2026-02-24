@@ -84,10 +84,11 @@ var clientSecretCredential = new ClientSecretCredential(
 );
 
 // Graph client (modern SDK) - configure with correct endpoint for the cloud
-var graphHttpClient = new HttpClient();
-graphHttpClient.BaseAddress = new Uri(graphBaseUrl);
-var authProvider = new Azure.Identity.TokenCredentialAuthProvider(clientSecretCredential, graphScopes);
-var graphClient = new GraphServiceClient(authProvider, graphHttpClient);
+var graphClientOptions = new GraphServiceClientOptions
+{
+    BaseUrl = graphBaseUrl
+};
+var graphClient = new GraphServiceClient(clientSecretCredential, graphScopes, graphClientOptions);
 
 // --------------------------
 // Validate SendFrom User
