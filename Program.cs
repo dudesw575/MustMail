@@ -9,6 +9,11 @@ using SmtpServer;
 using System.Reflection;
 using System.Text.Json;
 using ServiceProvider = SmtpServer.ComponentModel.ServiceProvider;
+using System.Net.Http;
+using Azure.Core;
+using System.Threading.Tasks;
+
+ 
 
 // Version and copyright message
 Console.ForegroundColor = ConsoleColor.Cyan; 
@@ -64,9 +69,9 @@ ISmtpServerOptions? options = new SmtpServerOptionsBuilder()
 
 // Azure Government configuration
 var authorityHost = AzureAuthorityHosts.AzureGovernment;
-var graphEndpoint = "https://graph.microsoft.us/.default";
+var graphScopes = new[] { "https://graph.microsoft.us/.default" };
 
-// Create client secrete credential 
+// Create client secrete credential with explicit Government Cloud authority
 ClientSecretCredential clientSecretCredential = new(
     config.Graph.TenantId, 
     config.Graph.ClientId, 
@@ -77,8 +82,76 @@ ClientSecretCredential clientSecretCredential = new(
     }
 );
 
-// Create graph client
-GraphServiceClient graphClient = new(clientSecretCredential, new[] { graphEndpoint });
+// Create HttpClient with BaseAddress pointing at the Government Graph endpoint
+var handler = new TokenCredentialHttpHandler(clientSecretCredential, graphScopes)
+{
+    InnerHandler = new HttpClientHandler()
+};
+
+var httpClient = new HttpClient(handler)
+{
+    BaseAddress = new Uri("https://graph.microsoft.us/v1.0")
+};
+
+GraphServiceClient graphClient = new(httpClient);
+
+// DEBUG: Log token and cloud configuration
+try
+{
+    var token = await clientSecretCredential.GetTokenAsync(
+        new Azure.Core.TokenRequestContext(graphScopes));
+    
+    // Decode JWT to see claims (basic decoding - not validation)
+    var parts = token.Token.Split('.');
+    if (parts.Length == 3)
+    {
+        var payload = parts[1];
+        // Add padding if needed
+        payload += new string('=', (4 - (payload.Length % 4)) % 4);
+        var jsonBytes = Convert.FromBase64String(payload);
+        var json = System.Text.Encoding.UTF8.GetString(jsonBytes);
+        
+        Log.Information("DEBUG - Token Claims: {TokenClaims}", json);
+        
+        // Parse and check issuer (accept both v1 "sts.windows.net" and v2 login endpoints for Gov)
+        var jsonDoc = JsonDocument.Parse(json);
+        var root = jsonDoc.RootElement;
+
+        if (root.TryGetProperty("iss", out var issuerElement))
+        {
+            var issuer = issuerElement.GetString() ?? "";
+
+            // Additional helpful claims
+            var tenantRegion = root.TryGetProperty("tenant_region_scope", out var tr) ? tr.GetString() : null;
+            var aud = root.TryGetProperty("aud", out var audEl) ? audEl.GetString() : null;
+            var tid = root.TryGetProperty("tid", out var tidEl) ? tidEl.GetString() : null;
+
+            Log.Information("DEBUG - Token Issuer: {Issuer}, Audience: {Aud}, TenantRegion: {TenantRegion}, Tid: {Tid}", issuer, aud, tenantRegion, tid);
+
+            // Determine if token appears to be from Azure Government Cloud.
+            // v2 tokens often have an issuer containing 'microsoftonline.us', but v1-style tokens use 'https://sts.windows.net/{tid}/'.
+            var isGov = (tenantRegion != null && tenantRegion.Equals("USGov", StringComparison.OrdinalIgnoreCase))
+                        || (aud != null && aud.Contains("graph.microsoft.us", StringComparison.OrdinalIgnoreCase))
+                        || issuer.Contains("microsoftonline.us", StringComparison.OrdinalIgnoreCase);
+
+            if (!isGov)
+            {
+                Log.Error("ERROR: Token issuer does not look like Azure Government Cloud!");
+                Log.Error("Issuer: {Issuer}", issuer);
+                Log.Error("TenantRegion: {TenantRegion}", tenantRegion);
+                Log.Error("If you created the app registration in the Azure Government portal (portal.azure.us), ensure the TenantId/ClientId/Secret configured are from that registration.");
+                Environment.Exit(1);
+            }
+        }
+    }
+    
+    Log.Information("DEBUG - Azure Cloud Configuration: Authority={Authority}, Scopes={Scopes}", 
+        authorityHost.ToString(), string.Join(", ", graphScopes));
+}
+catch (Exception ex)
+{
+    Log.Warning("DEBUG - Could not log token details: {Error}", ex.Message);
+}
 
 // SendFrom checks
 try
