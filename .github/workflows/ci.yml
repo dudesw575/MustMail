@@ -10,8 +10,8 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag (e.g., v1.2.3)"
-        required: true
+        description: "Optional release tag (e.g., v1.2.3). Leave empty to auto-generate"
+        required: false
         type: string
 
 env:
@@ -28,15 +28,23 @@ jobs:
         with:
           ref: main
 
-      - name: Get version
+      - name: Determine tag
+        shell: bash
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            tag="${{ github.event.inputs.tag }}"
+            if [ -z "${{ github.event.inputs.tag }}" ]; then
+              # auto-generate tag: vYYYYMMDD-HHMM
+              TAG="v$(date +%Y%m%d-%H%M)"
+              echo "No tag provided. Using auto-generated tag: $TAG"
+            else
+              TAG="${{ github.event.inputs.tag }}"
+            fi
           else
-            tag="${{ github.event.release.tag_name }}"
+            TAG="${{ github.event.release.tag_name }}"
           fi
-          echo "TAG=$tag" >> $GITHUB_ENV
-          echo "VERSION=${tag#v}" >> $GITHUB_ENV
+          VERSION="${TAG#v}"
+          echo "TAG=$TAG" >> $GITHUB_ENV
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
 
       - name: Bump project version
         id: bump
@@ -103,8 +111,11 @@ jobs:
         shell: bash
         run: |
           if ! git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "Creating tag $TAG..."
             git tag "$TAG"
             git push origin "$TAG"
+          else
+            echo "Tag $TAG already exists. Skipping creation."
           fi
 
       - name: Publish
