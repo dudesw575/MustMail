@@ -1,6 +1,7 @@
 using Azure.Identity;
-using Microsoft.Graph;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Graph;
+using Microsoft.Graph.Models;
 using MustMail;
 using Serilog;
 using Serilog.Events;
@@ -9,121 +10,120 @@ using System.Reflection;
 using System.Text.Json;
 using ServiceProvider = SmtpServer.ComponentModel.ServiceProvider;
 
-// Version banner
-Console.ForegroundColor = ConsoleColor.Cyan;
+// Version and copyright message
+Console.ForegroundColor = ConsoleColor.Cyan; 
 Console.WriteLine("Must Mail");
 Console.WriteLine(Assembly.GetEntryAssembly()!.GetName().Version?.ToString(3));
 Console.ForegroundColor = ConsoleColor.White;
 
-// --------------------------
 // Configuration
-// --------------------------
 IConfigurationBuilder builder = new ConfigurationBuilder()
     .SetBasePath(Directory.GetCurrentDirectory())
     .AddJsonFile("appsettings.json", optional: true)
     .AddEnvironmentVariables();
 
 IConfiguration configuration = builder.Build();
-Configuration? config = configuration.Get<Configuration>();
 
-if (config == null || config.Graph == null || config.Smtp == null || config.SendFrom == null)
+// Get log level string
+string logLevelString = configuration["LogLevel"] ?? "Information";
+
+// Parse to Serilog log level enum
+bool parsed = Enum.TryParse<LogEventLevel>(logLevelString, ignoreCase: true, out var logLevel);
+
+if (!parsed)
 {
-    Console.ForegroundColor = ConsoleColor.Red;
-    Console.WriteLine("Could not load configuration! Check your .env or appsettings.json.");
-    Environment.Exit(1);
+    logLevel = LogEventLevel.Information; 
 }
 
-// --------------------------
-// Logger
-// --------------------------
-string logLevelString = configuration["LogLevel"] ?? "Information";
-bool parsed = Enum.TryParse<LogEventLevel>(logLevelString, ignoreCase: true, out var logLevel);
-if (!parsed) logLevel = LogEventLevel.Information;
-
+// Creating logger
 Log.Logger = new LoggerConfiguration()
     .MinimumLevel.Is(logLevel)
-    .WriteTo.Console(
+     .WriteTo.Console(
         theme: Serilog.Sinks.SystemConsole.Themes.AnsiConsoleTheme.Literate,
         outputTemplate: "[{Timestamp:HH:mm:ss} {Level}] {Message:lj}{NewLine}{Exception}")
     .CreateLogger();
 
-Log.Information("Configuration: \n {Serialize}", JsonSerializer.Serialize(config, new JsonSerializerOptions { WriteIndented = true }));
+// Prase config
+Configuration? config  = configuration.Get<Configuration>();
 
-// --------------------------
-// SMTP Server Options
-// --------------------------
-ISmtpServerOptions options = new SmtpServerOptionsBuilder()
+// If configuration can not be parsed to config - exit
+if (config == null || config.Graph == null || config.Smtp == null || config.SendFrom == null)
+{
+    Log.Error("Could not load the configuration! Please see the README for how to set the configuration!");
+    Environment.Exit(1);
+}
+
+// Log configuration
+Log.Information("Configuration: \n {Serialize}", JsonSerializer.Serialize(config, new JsonSerializerOptions{WriteIndented = true}));
+
+// Create SMTP Server options
+ISmtpServerOptions? options = new SmtpServerOptionsBuilder()
     .ServerName(config.Smtp.Host)
     .Port(config.Smtp.Port, false)
     .Build();
 
-// --------------------------
-// Azure Cloud Setup
-// --------------------------
-// Use Azure Government only if explicitly configured as "Government"
-bool useGovCloud = configuration["AzureCloud"]?.Equals("Government", StringComparison.OrdinalIgnoreCase) ?? false;
+// Azure Government configuration
+var authorityHost = AzureAuthorityHosts.AzureGovernment;
+var graphEndpoint = "https://graph.microsoft.us/.default";
 
-string authorityHost = useGovCloud
-    ? AzureAuthorityHosts.AzureGovernment
-    : AzureAuthorityHosts.AzurePublicCloud;
-
-string graphBaseUrl = useGovCloud
-    ? "https://graph.microsoft.us/v1.0"
-    : "https://graph.microsoft.com/v1.0";
-
-string[] graphScopes = useGovCloud
-    ? new[] { "https://graph.microsoft.us/.default" }
-    : new[] { "https://graph.microsoft.com/.default" };
-
-// Credential
-var clientSecretCredential = new ClientSecretCredential(
-    config.Graph.TenantId,
-    config.Graph.ClientId,
+// Create client secrete credential 
+ClientSecretCredential clientSecretCredential = new(
+    config.Graph.TenantId, 
+    config.Graph.ClientId, 
     config.Graph.ClientSecret,
-    new ClientSecretCredentialOptions { AuthorityHost = authorityHost }
+    new ClientSecretCredentialOptions
+    {
+        AuthorityHost = authorityHost
+    }
 );
 
-// Graph client (modern SDK) - configure with correct endpoint for the cloud
-var graphClientOptions = new GraphServiceClientOptions
-{
-    BaseUrl = graphBaseUrl
-};
-var graphClient = new GraphServiceClient(clientSecretCredential, graphScopes, graphClientOptions);
+// Create graph client
+GraphServiceClient graphClient = new(clientSecretCredential, new[] { graphEndpoint });
 
-// --------------------------
-// Validate SendFrom User
-// --------------------------
+// SendFrom checks
 try
 {
-    var user = await graphClient.Users[config.SendFrom].GetAsync(req =>
-        req.QueryParameters.Select = new[] { "displayName", "mail", "mailboxSettings" });
 
-    if (user == null || (user.Mail == null && user.UserPrincipalName == null))
+    User? user = await graphClient.Users[config.SendFrom].GetAsync(rc => rc.QueryParameters.Select = new[] { "displayName", "mail", "mailboxSettings" });
+
+    if (user == null)
     {
-        Log.Error("The SendFrom address '{From}' does not exist or has no email.", config.SendFrom);
+        Log.Error("The specifed SendFrom address: '{From}' does not exist in the tenant!", config.SendFrom);
+        Environment.Exit(1);
+    }
+
+    if (user.Mail == null && user.UserPrincipalName == null)
+    {
+        Log.Error("The user '{From}' has no email address configured and cannot send mail.", config.SendFrom);
         Environment.Exit(1);
     }
 
     if (user.MailboxSettings == null)
-        Log.Warning("Mailbox settings for '{From}' not found. Sending may fail.", config.SendFrom);
+    {
+        Log.Warning("Mailbox settings for user '{From}' not found. Sending mail might not be available.", config.SendFrom);
+    }
 
-    Log.Information("SendFrom '{From}' is valid. DisplayName: '{DisplayName}'", config.SendFrom, user.DisplayName);
+    Log.Information("The user '{From}' has an email address configured and can send mail, the display name for the SendFrom address is: '{DisplayName}'", config.SendFrom, user.DisplayName);
+
 }
 catch (Microsoft.Graph.Models.ODataErrors.ODataError error)
 {
-    Log.Error("SendFrom '{From}' not found. Graph error: {Error}", config.SendFrom, error.Message);
+    Log.Error("The specifed SendFrom address: '{From}' does not exist in the tenant! The Micrsoft Graph error message is: '{Error}'", config.SendFrom, error.Message);
     Environment.Exit(1);
 }
 
-// --------------------------
-// SMTP Email Service
-// --------------------------
+// Create email service provider
 ServiceProvider emailServiceProvider = new();
+
+// Add the message handler to the service provider
 emailServiceProvider.Add(new MessageHandler(graphClient, Log.Logger.ForContext<MessageHandler>(), config.SendFrom));
 
-// Create and start SMTP server
+// Create the server
 SmtpServer.SmtpServer smtpServer = new(options, emailServiceProvider);
 
-Log.Information("SMTP server started on {Host}:{Port}", config.Smtp.Host, config.Smtp.Port);
+// Log server start
+Log.Information("Smtp server started on {SmtpHost}:{SmtpPort}", config.Smtp.Host, config.Smtp.Port);
 
+// Start the server
 await smtpServer.StartAsync(CancellationToken.None);
+
